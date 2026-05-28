@@ -1,5 +1,6 @@
 """
 Pipeline orchestrator: exploration, adversarial, and full (merge + judge) modes.
+Domain-agnostic: loads domain package via --domain flag.
 """
 
 from __future__ import annotations
@@ -17,17 +18,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import exploration_agent as ex
-from adversarial_agent import run_adversarial
+from domains import available_domains, load_domain
+from domains._base import DomainSpec
 from exploration_agent import run_exploration
+from adversarial_agent import run_adversarial
 from judge_agent import run_judge
-from p2p_live import LiveApiUnavailableError, probe_live_api
 from pipeline_agentops import (
     finalize_agent_trace,
     init_agentops_in_daemon_thread,
     is_agentops_enabled,
     start_agent_trace,
 )
+
+
+class LiveApiUnavailableError(RuntimeError):
+    """Raised when --live is set but the domain's live API cannot be reached."""
 
 
 def _utc_now_iso() -> str:
@@ -130,6 +135,7 @@ def _markers(stdout: str) -> dict[str, bool]:
 @dataclass
 class PipelineResult:
     mode: str
+    domain: str
     output_dir: Path
     test_report_path: Path | None = None
     judge_report_path: Path | None = None
@@ -145,6 +151,7 @@ class PipelineResult:
 def run_pipeline(
     mode: str,
     output_dir: Path,
+    domain: DomainSpec,
     model: str | None = None,
     *,
     live: bool = False,
@@ -160,10 +167,15 @@ def run_pipeline(
 
     base = (live_url or "http://localhost:8000").rstrip("/")
     if live:
-        ok, detail = probe_live_api(base)
+        if domain.probe_live_api is None:
+            raise LiveApiUnavailableError(
+                f"Domain {domain.name!r} does not support live mode (no live adapter).\n"
+                "Run without --live (mock tools)."
+            )
+        ok, detail = domain.probe_live_api(base)
         if not ok:
             raise LiveApiUnavailableError(
-                f"Live P2P API is not reachable at {base}.\n{detail}\n"
+                f"Live API is not reachable at {base}.\n{detail}\n"
                 "Start the server on that host/port or run without --live (mock tools)."
             )
         os.environ["P2P_LIVE"] = "1"
@@ -175,24 +187,25 @@ def run_pipeline(
     out = output_dir.resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    result = PipelineResult(mode=mode, output_dir=out)
+    result = PipelineResult(mode=mode, domain=domain.name, output_dir=out)
     tool_events: list[dict[str, Any]] = []
     exploration_log = ""
     adversarial_log = ""
     judge_log = ""
 
     if mode in ("explore", "full"):
-        ex.STORE = ex.MockP2PStore()
+        store = domain.MockStore()
         ao_trace = start_agent_trace(
             "exploration",
             pipeline_mode=mode,
             live=bool(live),
+            domain_name=domain.name,
         )
         buf = io.StringIO()
         exc: BaseException | None = None
         try:
             with redirect_stdout(buf):
-                run_exploration()
+                run_exploration(domain, store=store, live=live)
         except BaseException as e:
             exc = e
         exploration_log = buf.getvalue()
@@ -223,12 +236,13 @@ def run_pipeline(
             "adversarial",
             pipeline_mode=mode,
             live=bool(live),
+            domain_name=domain.name,
         )
         buf = io.StringIO()
         exc = None
         try:
             with redirect_stdout(buf):
-                run_adversarial()
+                run_adversarial(domain, live=live)
         except BaseException as e:
             exc = e
         adversarial_log = buf.getvalue()
@@ -268,6 +282,7 @@ def run_pipeline(
             "judge",
             pipeline_mode=mode,
             live=bool(live),
+            domain_name=domain.name,
         )
         jbuf = io.StringIO()
         exc = None
@@ -275,6 +290,7 @@ def run_pipeline(
         try:
             with redirect_stdout(jbuf):
                 jr = run_judge(
+                    domain,
                     exploration_path=str(expl_path),
                     adversarial_path=str(adv_path),
                     model=model,
@@ -339,7 +355,8 @@ def run_pipeline(
         result.happy_path_status = "N/A"
 
     test_report: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
+        "domain": domain.name,
         "mode": mode,
         "live": bool(live),
         "live_base_url": base if live else None,
@@ -383,6 +400,7 @@ def run_pipeline(
 def _print_summary(r: PipelineResult, *, live: bool = False) -> None:
     print()
     print("========== PIPELINE SUMMARY ==========")
+    print(f"domain:                {r.domain}")
     print(f"live (HTTP):           {live}")
     print(f"AgentOps tracing:      {is_agentops_enabled()}")
     if r.agentops_urls:
@@ -411,12 +429,18 @@ def _print_summary(r: PipelineResult, *, live: bool = False) -> None:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Run exploration / adversarial / full P2P QA pipeline.")
+    avail = ", ".join(available_domains())
+    p = argparse.ArgumentParser(description="Run exploration / adversarial / full QA pipeline.")
     p.add_argument(
         "--mode",
         choices=("explore", "adversarial", "full"),
         required=True,
         help="explore: exploration agent only; adversarial: adversarial only; full: both + judge",
+    )
+    p.add_argument(
+        "--domain",
+        default="p2p",
+        help=f"Domain to audit. Available: {avail} (default: p2p)",
     )
     p.add_argument(
         "--output-dir",
@@ -428,12 +452,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--live",
         action="store_true",
-        help="Use real HTTP calls to P2P_LIVE_BASE_URL (default http://localhost:8000) instead of mocks.",
+        help="Use real HTTP calls instead of mocks (requires domain live adapter).",
     )
     p.add_argument(
         "--live-url",
         default=None,
-        help="Base URL for live mode (default: http://localhost:8000). Endpoints from p2p_api_spec.md.",
+        help="Base URL for live mode (default: http://localhost:8000).",
     )
     return p.parse_args()
 
@@ -441,9 +465,15 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        domain = load_domain(args.domain)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    try:
         r = run_pipeline(
             mode=args.mode,
             output_dir=args.output_dir,
+            domain=domain,
             model=args.model,
             live=bool(args.live),
             live_url=args.live_url,

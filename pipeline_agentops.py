@@ -1,5 +1,5 @@
 """
-AgentOps observability for the P2P pipeline: init (bounded wait), per-agent traces, URLs.
+AgentOps observability for the audit pipeline: init (bounded wait), per-agent traces, URLs.
 All AgentOps calls are wrapped so failures never propagate to the pipeline.
 """
 
@@ -78,6 +78,7 @@ def start_agent_trace(
     *,
     pipeline_mode: str,
     live: bool,
+    domain_name: str = "p2p",
 ) -> Any:
     """Start a named trace for one agent session. Returns TraceContext or None."""
     if not is_agentops_enabled():
@@ -86,12 +87,13 @@ def start_agent_trace(
         import agentops
 
         tags: list[str] = [
+            f"domain:{domain_name}",
             f"agent:{agent_name}",
             f"mode:{pipeline_mode}",
             f"live:{live}",
         ]
         ctx = agentops.start_trace(
-            trace_name=f"P2P {agent_name}",
+            trace_name=f"{domain_name} {agent_name}",
             tags=tags,
         )
         return ctx

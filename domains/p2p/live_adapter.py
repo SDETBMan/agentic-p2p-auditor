@@ -1,6 +1,8 @@
 """
 Live HTTP adapter for P2P tools against a REST API (see p2p_api_spec.md).
 Uses stdlib urllib only. Returns dicts compatible with mock tool responses.
+
+Moved from top-level p2p_live.py into the P2P domain package.
 """
 
 from __future__ import annotations
@@ -94,10 +96,6 @@ def _pick_id(obj: dict[str, Any], *keys: str) -> str | None:
         if v is not None and str(v).strip():
             return str(v)
     return None
-
-
-class LiveApiUnavailableError(RuntimeError):
-    """Raised when --live is set but the P2P HTTP API cannot be reached."""
 
 
 def dispatch_live_http(name: str, tool_input: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 """
-Adversarial red-team loop against the P2P mock API. Reuses tool definitions and
-handlers from exploration_agent — do not duplicate mock implementations here.
+Domain-agnostic adversarial red-team loop. All domain-specific logic
+(store, tools, prompts) is injected via DomainSpec.
 """
 
 from __future__ import annotations
@@ -10,22 +10,13 @@ import os
 import time
 from typing import Any
 
-import exploration_agent as ex
-
 from agent_client import agent_wall_clock_seconds, make_anthropic_client
-
-# Reuse the same five mock tools (schemas + handlers) from exploration_agent; do not duplicate mocks.
-def _reset_store() -> None:
-    """Fresh in-memory store per run so attacks do not inherit exploration_agent state."""
-    ex.STORE = ex.MockP2PStore()
+from domains._base import DomainSpec, build_full_tools, report_findings
 
 
-SYSTEM_PROMPT = """You are an expert red team QA engineer specializing in financial systems. Your job is to deliberately attempt to violate each of the six financial control rules: overpayment protection, 3-way match gate, partial receipt flag, inactive vendor gate, GL balance, and duplicate invoice detection. For each attempt: name the rule you are attacking, describe exactly what you tried, record what the API returned, and verdict HELD if the API rejected it or BREACHED if it did not. Only mark HELD if you have explicit rejection evidence from the actual API response. After testing all six specified rules, probe for additional edge cases a human tester would miss — including zero-amount invoices, negative quantities, floating point rounding errors on currency calculations, and race conditions from rapid sequential submissions. Label these clearly as unspecified edge cases in your report.
-
-Use only the provided tools. After each attack or probe, call report_findings so the request, the observed API response, and your HELD/BREACHED verdict (with justification tied to explicit response fields) are recorded.
-
-When the report is complete, include the exact marker [[ADVERSARIAL_COMPLETE]] on its own line. Do not treat end_turn alone as completion."""
-
+# ---------------------------------------------------------------------------
+# Agent loop helpers
+# ---------------------------------------------------------------------------
 
 def _content_blocks_to_assistant_message(content: list[Any]) -> dict[str, Any]:
     return {"role": "assistant", "content": content}
@@ -43,13 +34,23 @@ def _has_exit_marker(text: str) -> bool:
     return "[[ADVERSARIAL_COMPLETE]]" in text
 
 
+# ---------------------------------------------------------------------------
+# Main adversarial loop
+# ---------------------------------------------------------------------------
+
 def run_adversarial(
+    domain: DomainSpec,
     user_prompt: str | None = None,
     *,
     max_iterations: int = 30,
     model: str | None = None,
+    live: bool = False,
 ) -> None:
-    _reset_store()
+    """Run the adversarial agent loop for the given domain.
+
+    Each run creates a fresh store -- no cross-contamination from exploration.
+    """
+    store = domain.MockStore()
 
     client = make_anthropic_client()
     model_name = model or os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
@@ -58,14 +59,8 @@ def run_adversarial(
     wall_limit = agent_wall_clock_seconds()
     wall_deadline = wall_start + wall_limit
 
-    initial = user_prompt or (
-        "Execute red-team attacks against all six financial controls using the tools. "
-        "For each rule: attempt a violation, capture the real API response in report_findings, "
-        "and assign HELD or BREACHED only from explicit response evidence. "
-        "Then run unspecified edge-case probes (zero-amount invoice, negative qty, rounding stress, "
-        "rapid duplicate submissions) and label them as unspecified edge cases. "
-        "End with [[ADVERSARIAL_COMPLETE]]."
-    )
+    initial = user_prompt or domain.default_adversarial_user_prompt
+    tools = build_full_tools(domain.domain_tools)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": initial}]
 
@@ -105,9 +100,9 @@ def run_adversarial(
                 model=model_name,
                 max_tokens=8192,
                 temperature=0,
-                system=SYSTEM_PROMPT,
+                system=domain.adversarial_system_prompt,
                 messages=messages,
-                tools=ex.TOOLS,
+                tools=tools,
             )
         except Exception as e:
             print(
@@ -145,7 +140,7 @@ def run_adversarial(
                 )
             else:
                 nudge_body = (
-                    "Continue adversarial testing with the tools until all six rules "
+                    "Continue adversarial testing with the tools until all control rules "
                     "and edge-case probes are done and logged via report_findings. "
                     "When finished, output [[ADVERSARIAL_COMPLETE]]. "
                     "Do not stop on end_turn alone."
@@ -165,7 +160,20 @@ def run_adversarial(
             tool_input = dict(block.input)
             print(f"\n--- iteration {iteration + 1} tool request: {name} ---")
             print(json.dumps(tool_input, indent=2, default=str))
-            result = ex.dispatch_tool(name, tool_input)
+
+            if name == "report_findings":
+                result = report_findings(
+                    step_name=tool_input["step_name"],
+                    request_summary=tool_input["request_summary"],
+                    response_summary=tool_input["response_summary"],
+                    outcome_correct=tool_input["outcome_correct"],
+                    notes=tool_input["notes"],
+                )
+            elif live and domain.dispatch_live_http is not None:
+                result = domain.dispatch_live_http(name, tool_input)
+            else:
+                result = store.dispatch(name, tool_input)
+
             print(f"--- iteration {iteration + 1} tool response: {name} ---")
             print(json.dumps(result, indent=2, default=str))
             tool_result_blocks.append(
@@ -187,4 +195,7 @@ def run_adversarial(
 
 
 if __name__ == "__main__":
-    run_adversarial()
+    from domains import load_domain
+
+    domain = load_domain("p2p")
+    run_adversarial(domain)
