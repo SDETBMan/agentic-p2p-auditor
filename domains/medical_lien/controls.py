@@ -12,26 +12,32 @@ from typing import Any
 CONTROL_RULES: list[dict[str, Any]] = [
     {
         "name": "lien_priority_enforcement",
+        "severity": "CRITICAL",
         "description": "Federal liens (Medicare/Medicaid) subordinated in payment order",
     },
     {
         "name": "balance_cap",
+        "severity": "HIGH",
         "description": "Lien balance inflated beyond original billed amount",
     },
     {
         "name": "duplicate_lien_detection",
+        "severity": "CRITICAL",
         "description": "Same provider + case + service date paying twice",
     },
     {
         "name": "provider_status_gate",
+        "severity": "HIGH",
         "description": "Liens filed by suspended/excluded providers accepted",
     },
     {
         "name": "settlement_waterfall_order",
+        "severity": "CRITICAL",
         "description": "Disbursement out of legal priority order",
     },
     {
         "name": "reduction_negotiation_cap",
+        "severity": "MEDIUM",
         "description": "Negotiated reduction exceeding policy max percentage",
     },
 ]

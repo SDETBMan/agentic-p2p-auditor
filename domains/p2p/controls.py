@@ -7,12 +7,12 @@ from __future__ import annotations
 from typing import Any
 
 CONTROL_RULES: list[dict[str, Any]] = [
-    {"name": "overpayment_protection", "description": "Cumulative payments exceeding PO/invoice authorization"},
-    {"name": "three_way_match_gate", "description": "Invoice approval without matching PO + receipt within tolerance"},
-    {"name": "partial_receipt_flag", "description": "Full invoice matching against partially received goods"},
-    {"name": "inactive_vendor_gate", "description": "PO submission or invoice posting against blocked/inactive vendors"},
-    {"name": "gl_balance", "description": "Unbalanced debit/credit postings corrupting the general ledger"},
-    {"name": "duplicate_invoice_detection", "description": "Same vendor + invoice number paying twice"},
+    {"name": "overpayment_protection", "severity": "CRITICAL", "description": "Cumulative payments exceeding PO/invoice authorization"},
+    {"name": "three_way_match_gate", "severity": "CRITICAL", "description": "Invoice approval without matching PO + receipt within tolerance"},
+    {"name": "partial_receipt_flag", "severity": "HIGH", "description": "Full invoice matching against partially received goods"},
+    {"name": "inactive_vendor_gate", "severity": "HIGH", "description": "PO submission or invoice posting against blocked/inactive vendors"},
+    {"name": "gl_balance", "severity": "CRITICAL", "description": "Unbalanced debit/credit postings corrupting the general ledger"},
+    {"name": "duplicate_invoice_detection", "severity": "CRITICAL", "description": "Same vendor + invoice number paying twice"},
 ]
 
 

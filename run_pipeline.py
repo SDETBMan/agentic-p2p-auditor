@@ -35,6 +35,138 @@ class LiveApiUnavailableError(RuntimeError):
     """Raised when --live is set but the domain's live API cannot be reached."""
 
 
+# ---------------------------------------------------------------------------
+# Release gate evaluation
+# ---------------------------------------------------------------------------
+
+# Severity tiers in descending order of impact
+_SEVERITY_ORDER = ["CRITICAL", "HIGH", "MEDIUM", "EVAL"]
+
+
+def _evaluate_release_gate(
+    judge_report: dict[str, Any] | None,
+    domain: DomainSpec,
+) -> dict[str, Any]:
+    """Evaluate the judge report against domain control severities.
+
+    Returns a dict with:
+        signal: PASS | WARN | BLOCK
+        exit_code: 0 (PASS/WARN) or 1 (BLOCK)
+        breached: list of {rule, severity} for breached controls
+        held: list of {rule, severity} for held controls
+        detail: human-readable summary
+    """
+    if judge_report is None:
+        return {
+            "signal": "BLOCK",
+            "exit_code": 1,
+            "breached": [],
+            "held": [],
+            "detail": "No judge report produced — cannot verify controls.",
+        }
+
+    # Build severity lookup from domain control rules
+    severity_map: dict[str, str] = {}
+    for rule in domain.control_rules:
+        severity_map[rule["name"]] = rule.get("severity", "MEDIUM")
+
+    adversarial = judge_report.get("adversarial", [])
+    breached: list[dict[str, str]] = []
+    held: list[dict[str, str]] = []
+
+    for item in adversarial:
+        if not isinstance(item, dict):
+            continue
+        rule = item.get("rule", "")
+        status = item.get("status", "")
+        # Fuzzy-match rule name against domain control rules
+        severity = _match_severity(rule, severity_map)
+        entry = {"rule": rule, "severity": severity, "status": status}
+        if status == "BREACHED":
+            breached.append(entry)
+        elif status == "HELD":
+            held.append(entry)
+
+    # Check happy path
+    hp = judge_report.get("happy_path", {})
+    hp_failed = isinstance(hp, dict) and hp.get("status") == "FAIL"
+
+    # Determine gate signal
+    if hp_failed:
+        return {
+            "signal": "BLOCK",
+            "exit_code": 1,
+            "breached": breached,
+            "held": held,
+            "detail": "Happy path FAILED — system does not function correctly under normal operation.",
+        }
+
+    critical_breached = [b for b in breached if b["severity"] == "CRITICAL"]
+    high_breached = [b for b in breached if b["severity"] == "HIGH"]
+    medium_breached = [b for b in breached if b["severity"] == "MEDIUM"]
+
+    if critical_breached:
+        rules = ", ".join(b["rule"] for b in critical_breached)
+        return {
+            "signal": "BLOCK",
+            "exit_code": 1,
+            "breached": breached,
+            "held": held,
+            "detail": f"CRITICAL control(s) breached: {rules}. Deploy must not proceed.",
+        }
+
+    if high_breached:
+        rules = ", ".join(b["rule"] for b in high_breached)
+        return {
+            "signal": "WARN",
+            "exit_code": 0,
+            "breached": breached,
+            "held": held,
+            "detail": f"HIGH control(s) breached: {rules}. Deploy blocked unless override ticket filed.",
+        }
+
+    if medium_breached:
+        rules = ", ".join(b["rule"] for b in medium_breached)
+        return {
+            "signal": "WARN",
+            "exit_code": 0,
+            "breached": breached,
+            "held": held,
+            "detail": f"MEDIUM control(s) breached: {rules}. Alert created; deploy proceeds.",
+        }
+
+    return {
+        "signal": "PASS",
+        "exit_code": 0,
+        "breached": breached,
+        "held": held,
+        "detail": "All controls held. Deploy proceeds.",
+    }
+
+
+def _match_severity(rule_name: str, severity_map: dict[str, str]) -> str:
+    """Match a judge-reported rule name to a domain control severity.
+
+    The judge may use slightly different rule names (e.g., "overpayment protection"
+    vs "overpayment_protection"), so we normalize and do substring matching.
+    """
+    # Exact match first
+    if rule_name in severity_map:
+        return severity_map[rule_name]
+    # Normalize: lowercase, replace spaces/hyphens with underscores
+    normalized = rule_name.lower().replace(" ", "_").replace("-", "_")
+    if normalized in severity_map:
+        return severity_map[normalized]
+    # Substring match: check if any control name is contained in the rule name
+    for control_name, severity in severity_map.items():
+        cn = control_name.lower()
+        rn = normalized
+        if cn in rn or rn in cn:
+            return severity
+    # Default to MEDIUM for unrecognized rules (edge cases the adversary found)
+    return "MEDIUM"
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -143,6 +275,7 @@ class PipelineResult:
     total_tool_events: int = 0
     verdict_found: str = ""
     judge_aggregate_confidence: float | None = None
+    release_gate: dict[str, Any] | None = None
     flags: list[str] = field(default_factory=list)
     judge_report: dict[str, Any] | None = None
     agentops_urls: list[dict[str, str]] = field(default_factory=list)
@@ -349,6 +482,9 @@ def run_pipeline(
 
         if result.happy_path_status == "FAIL":
             result.flags.append("happy_path_failed")
+
+        # Evaluate release gate against domain control severities
+        result.release_gate = _evaluate_release_gate(jr, domain)
     else:
         result.judge_report_path = None
         result.judge_aggregate_confidence = None
@@ -364,6 +500,7 @@ def run_pipeline(
         "agentops_session_urls": list(result.agentops_urls),
         "generated_at": _utc_now_iso(),
         "output_dir": str(out),
+        "release_gate": result.release_gate,
         "tool_events": tool_events,
         "phases": {},
     }
@@ -423,6 +560,24 @@ def _print_summary(r: PipelineResult, *, live: bool = False) -> None:
         "judge agg. confidence: "
         + (f"{conf:.4f}" if isinstance(conf, float) else "N/A")
     )
+    if r.release_gate:
+        gate = r.release_gate
+        signal = gate.get("signal", "N/A")
+        detail = gate.get("detail", "")
+        breached = gate.get("breached", [])
+        held = gate.get("held", [])
+        print(f"release gate:          {signal}")
+        if breached:
+            print(f"  breached ({len(breached)}):")
+            for b in breached:
+                print(f"    [{b['severity']}] {b['rule']}")
+        if held:
+            print(f"  held ({len(held)}):")
+            for h in held:
+                print(f"    [{h['severity']}] {h['rule']}")
+        print(f"  detail: {detail}")
+    else:
+        print("release gate:          N/A (full mode only)")
     print(f"flags raised:          {r.flags if r.flags else '[]'}")
     print("======================================")
     print()
@@ -485,6 +640,10 @@ def main() -> int:
         print(f"pipeline failed: {e}", file=sys.stderr)
         return 1
     _print_summary(r, live=bool(args.live))
+
+    # Return release gate exit code: 1 for BLOCK, 0 otherwise
+    if r.release_gate:
+        return r.release_gate.get("exit_code", 0)
     return 0
 
 

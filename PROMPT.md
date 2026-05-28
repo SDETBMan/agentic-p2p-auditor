@@ -78,9 +78,19 @@ python run_pipeline.py --mode full --domain medical-lien --output-dir pipeline_o
 - **AgentOps optional** — observability never blocks execution
 - **Live adapter optional per domain** — framework checks; if absent, `--live` is rejected with a clear message
 
+### Release Gate (CI/CD Integration)
+
+After the judge phase, the pipeline evaluates a **release gate** based on control severity tiers:
+- **CRITICAL breach → BLOCK (exit code 1)** — deploy must not proceed
+- **HIGH breach → WARN (exit code 0)** — deploy blocked unless override ticket filed
+- **MEDIUM breach → WARN (exit code 0)** — alert created, deploy proceeds
+- **All held → PASS (exit code 0)** — deploy proceeds
+
+Each control rule has a severity (CRITICAL, HIGH, or MEDIUM). The gate also blocks if the happy path failed or no judge report was produced. This enables: `python run_pipeline.py --mode full --domain p2p && deploy.sh`
+
 ### Output Artifacts
 
-- `test_report.json` — tool events from all phases, markers, metadata
+- `test_report.json` — tool events from all phases, markers, metadata, release gate signal
 - `judge_report.json` — `{happy_path: {status, steps}, adversarial: [{rule, status, evidence}], summary}`
 - Phase logs: `exploration_run.log`, `adversarial_run.log`, `judge_run.log`
 
