@@ -1,5 +1,5 @@
 anthropic>=0.40.0
 agentops>=0.3.0
-deepeval>=2.0.0
+deepeval>=3.8.0,<4.0.0
 openai>=1.0.0
 pytest>=9.0.0
