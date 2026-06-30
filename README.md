@@ -48,6 +48,9 @@ pip install -r requirements.txt
 # Set your Anthropic API key
 export ANTHROPIC_API_KEY="sk-ant-..."
 
+# Run safety tests (bias + toxicity on audit outputs — requires OPENAI_API_KEY)
+pytest -m safety -v
+
 # Run full pipeline with P2P domain (default)
 python run_pipeline.py --mode full --domain p2p --output-dir pipeline_output
 
@@ -208,7 +211,7 @@ agentic-p2p-auditor/
 ├── pipeline_agentops.py               # Bounded AgentOps init + per-agent trace helpers
 ├── data_generator.py                  # Synthetic P2P scenario generator (standalone tool)
 ├── p2p_api_spec.md                    # P2P REST API specification
-├── requirements.txt                   # anthropic, agentops
+├── requirements.txt                   # anthropic, agentops, deepeval, openai, pytest
 ├── domains/
 │   ├── __init__.py                    # Domain registry + load_domain()
 │   ├── _base.py                       # DomainSpec dataclass, universal report_findings
@@ -225,6 +228,10 @@ agentic-p2p-auditor/
 │       ├── tools.py                   # 6 medical lien tool schemas
 │       ├── prompts.py                 # System + user prompts
 │       └── controls.py                # Control rules + rejection_signals()
+├── tests/                             # Pytest safety eval suite
+│   ├── conftest.py                    # MockP2PStore fixture
+│   └── test_bias_toxicity.py          # DeepEval BiasMetric + ToxicityMetric on audit outputs
+├── pytest.ini                         # markers: safety
 └── pipeline_output/                   # Generated: logs, test_report.json, judge_report.json
 ```
 
